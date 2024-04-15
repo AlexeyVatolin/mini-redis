@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 
 from app.command_handler import RedisCommandHandler
@@ -26,9 +27,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=6379)
+    args = parser.parse_args()
+
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
-    server = await asyncio.start_server(handle_client, "localhost", 6379)
+    server = await asyncio.start_server(handle_client, "localhost", args.port)
     async with server:
         await server.serve_forever()
 
