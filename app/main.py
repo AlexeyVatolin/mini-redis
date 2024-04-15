@@ -30,6 +30,11 @@ class RedisServer:
             writer,
             [BulkString("REPLCONF"), BulkString("capa"), BulkString("psync2")],
         )
+        await self._send_request(
+            reader,
+            writer,
+            [BulkString("PSYNC"), BulkString("?"), BulkString("-1")],
+        )
 
     async def _send_request(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, message: Any

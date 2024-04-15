@@ -60,5 +60,7 @@ class RedisCommandHandler:
                 )
             case "replconf":
                 return SimpleString("OK")
+            case "psync":
+                return SimpleString(f"FULLRESYNC {self._master_id} {self._offset}")
             case _:
                 return ErrorString("Unknown command")
