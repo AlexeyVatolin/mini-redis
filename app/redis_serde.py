@@ -7,6 +7,12 @@ class SimpleString(str): ...
 class BulkString(str): ...
 
 
+class ErrorString(str): ...
+
+
+class NullString: ...
+
+
 class RedisSerializer:
     def serialize(self, message: Any) -> bytes:
         return self._serialize_impl(message).encode()
@@ -16,6 +22,10 @@ class RedisSerializer:
             return f"${len(message)}\r\n{message}\r\n"
         elif isinstance(message, SimpleString):
             return f"+{message}\r\n"
+        elif isinstance(message, ErrorString):
+            return f"-{message}\r\n"
+        elif isinstance(message, NullString):
+            return "$-1\r\n"
 
 
 class RedisDeserializer:
