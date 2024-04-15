@@ -2,7 +2,7 @@ import argparse
 import asyncio
 
 from app.command_handler import RedisCommandHandler
-from app.redis_serde import RedisDeserializer, RedisSerializer
+from app.redis_serde import BulkString, RedisDeserializer, RedisSerializer
 
 CHUNK_SIZE = 100
 
@@ -12,6 +12,16 @@ class ClientContext:
         self._master_host = master_host
         self._master_port = master_port
         self._handler = RedisCommandHandler(self._master_host is None)
+
+    async def connect_master(self) -> None:
+        if not self._master_host:
+            return
+        reader, writer = await asyncio.open_connection(self._master_host, self._master_port)
+        out_message = RedisSerializer().serialize([BulkString("ping")])
+        writer.write(out_message)
+        await writer.drain()
+        response = await reader.read(CHUNK_SIZE)
+        print(f"Response from master: {RedisDeserializer().deserialize(response)}")
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -45,6 +55,7 @@ async def main():
     if args.replicaof:
         master_host, master_port = args.replicaof
     context = ClientContext(master_host, master_port)
+    await context.connect_master()
     server = await asyncio.start_server(context.handle_client, "localhost", args.port)
     async with server:
         await server.serve_forever()

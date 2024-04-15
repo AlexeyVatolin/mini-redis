@@ -26,11 +26,16 @@ class RedisSerializer:
             return f"-{message}\r\n"
         elif isinstance(message, NullString):
             return "$-1\r\n"
+        elif isinstance(message, list):
+            return f"*{len(message)}\r\n{''.join(self._serialize_impl(item) for item in message)}"
+        else:
+            raise ValueError(f"Unsupported message type {type(message)}")
 
 
 class RedisDeserializer:
     def deserialize(self, message: bytes) -> Any:
-        return self._deserialize_impl(message.decode())
+        value, _ = self._deserialize_impl(message.decode())
+        return value
 
     def _deserialize_impl(self, message: str, start_index: int = 0) -> Any:
         if message[start_index] == "*":
@@ -39,10 +44,12 @@ class RedisDeserializer:
             while len(arr) < num_elements:
                 elem, end_index = self._deserialize_impl(message, end_index + 2)
                 arr.append(elem)
-            return arr
+            return arr, end_index
         elif message[start_index] == "$":
             size, end_index = self._parse_number(message, start_index + 1)
             return BulkString(message[end_index + 2 : end_index + 2 + size]), end_index + 2 + size
+        elif message[start_index] == "+":
+            return SimpleString(message[start_index + 1 : len(message) - 2]), len(message) - 2
 
     def _parse_number(self, s: str, start_index: int) -> tuple[int, int]:
         end_index = start_index
