@@ -45,5 +45,9 @@ class RedisCommandHandler:
                         del STORAGE[message[1]]
 
                 return NullString()
+            case "info":
+                if len(message) != 2 or message[1].lower() != "replication":
+                    return ErrorString("Wrong arguments for 'info' command")
+                return BulkString("# Replication\nrole:master")
             case _:
                 return ErrorString("Unknown command")
