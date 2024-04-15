@@ -58,5 +58,7 @@ class RedisCommandHandler:
                 return BulkString(
                     f"# Replication\nrole:{role}\nmaster_replid:{self._master_id}\nmaster_repl_offset:{self._offset}"
                 )
+            case "replconf":
+                return SimpleString("OK")
             case _:
                 return ErrorString("Unknown command")

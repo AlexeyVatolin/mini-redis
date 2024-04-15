@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from typing import Any
 
 from app.command_handler import RedisCommandHandler
 from app.redis_serde import BulkString, RedisDeserializer, RedisSerializer
@@ -7,8 +8,9 @@ from app.redis_serde import BulkString, RedisDeserializer, RedisSerializer
 CHUNK_SIZE = 100
 
 
-class ClientContext:
-    def __init__(self, master_host: str | None, master_port: int | None) -> None:
+class RedisServer:
+    def __init__(self, port: int, master_host: str | None, master_port: int | None) -> None:
+        self._port = port
         self._master_host = master_host
         self._master_port = master_port
         self._handler = RedisCommandHandler(self._master_host is None)
@@ -17,11 +19,29 @@ class ClientContext:
         if not self._master_host:
             return
         reader, writer = await asyncio.open_connection(self._master_host, self._master_port)
-        out_message = RedisSerializer().serialize([BulkString("ping")])
+        await self._send_request(reader, writer, [BulkString("ping")])
+        await self._send_request(
+            reader,
+            writer,
+            [BulkString("REPLCONF"), BulkString("listening-port"), BulkString(self._port)],
+        )
+        await self._send_request(
+            reader,
+            writer,
+            [BulkString("REPLCONF"), BulkString("capa"), BulkString("psync2")],
+        )
+
+    async def _send_request(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, message: Any
+    ) -> Any:
+        out_message = RedisSerializer().serialize(message)
         writer.write(out_message)
         await writer.drain()
-        response = await reader.read(CHUNK_SIZE)
-        print(f"Response from master: {RedisDeserializer().deserialize(response)}")
+        raw_response = await reader.read(CHUNK_SIZE)
+        print(f"Master raw response: {raw_response}")
+        response = RedisDeserializer().deserialize(raw_response)
+        print(f"Response from master: {response}")
+        return response
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -54,7 +74,7 @@ async def main():
     master_host, master_port = None, None
     if args.replicaof:
         master_host, master_port = args.replicaof
-    context = ClientContext(master_host, master_port)
+    context = RedisServer(args.port, master_host, master_port)
     await context.connect_master()
     server = await asyncio.start_server(context.handle_client, "localhost", args.port)
     async with server:

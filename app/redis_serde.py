@@ -38,6 +38,8 @@ class RedisDeserializer:
         return value
 
     def _deserialize_impl(self, message: str, start_index: int = 0) -> Any:
+        if len(message) - start_index == 0:
+            return None, None
         if message[start_index] == "*":
             num_elements, end_index = self._parse_number(message, start_index + 1)
             arr = []
