@@ -11,6 +11,7 @@ class ClientContext:
     def __init__(self, master_host: str | None, master_port: int | None) -> None:
         self._master_host = master_host
         self._master_port = master_port
+        self._handler = RedisCommandHandler(self._master_host is None)
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -23,8 +24,7 @@ class ClientContext:
             print(f"{addr}: {message!r}")
 
             parsed_message = RedisDeserializer().deserialize(message)
-            handler = RedisCommandHandler(self._master_host is None)
-            out_message = RedisSerializer().serialize(handler.handle(parsed_message))
+            out_message = RedisSerializer().serialize(self._handler.handle(parsed_message))
             print(out_message)
             writer.write(out_message)
             await writer.drain()
