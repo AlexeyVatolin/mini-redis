@@ -7,6 +7,9 @@ class SimpleString(str): ...
 class BulkString(str): ...
 
 
+class RDBString(bytes): ...
+
+
 class ErrorString(str): ...
 
 
@@ -15,19 +18,23 @@ class NullString: ...
 
 class RedisSerializer:
     def serialize(self, message: Any) -> bytes:
-        return self._serialize_impl(message).encode()
+        return self._serialize_impl(message)
 
-    def _serialize_impl(self, message: Any) -> str:
+    def _serialize_impl(self, message: Any) -> bytes:
         if isinstance(message, BulkString):
-            return f"${len(message)}\r\n{message}\r\n"
+            return f"${len(message)}\r\n{message}\r\n".encode()
         elif isinstance(message, SimpleString):
-            return f"+{message}\r\n"
+            return f"+{message}\r\n".encode()
         elif isinstance(message, ErrorString):
-            return f"-{message}\r\n"
+            return f"-{message}\r\n".encode()
+        elif isinstance(message, RDBString):
+            return f"${len(message)}\r\n".encode() + message
         elif isinstance(message, NullString):
-            return "$-1\r\n"
+            return "$-1\r\n".encode()
         elif isinstance(message, list):
-            return f"*{len(message)}\r\n{''.join(self._serialize_impl(item) for item in message)}"
+            return f"*{len(message)}\r\n".encode() + b"".join(
+                self._serialize_impl(item) for item in message
+            )
         else:
             raise ValueError(f"Unsupported message type {type(message)}")
 

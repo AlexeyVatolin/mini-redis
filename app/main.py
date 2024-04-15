@@ -35,6 +35,7 @@ class RedisServer:
             writer,
             [BulkString("PSYNC"), BulkString("?"), BulkString("-1")],
         )
+        await reader.read(CHUNK_SIZE)
 
     async def _send_request(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, message: Any
@@ -59,10 +60,11 @@ class RedisServer:
             print(f"{addr}: {message!r}")
 
             parsed_message = RedisDeserializer().deserialize(message)
-            out_message = RedisSerializer().serialize(self._handler.handle(parsed_message))
-            print(out_message)
-            writer.write(out_message)
-            await writer.drain()
+            for raw_out_message in self._handler.handle(parsed_message):
+                out_message = RedisSerializer().serialize(raw_out_message)
+                print(out_message)
+                writer.write(out_message)
+                await writer.drain()
 
         writer.close()
         await writer.wait_closed()
