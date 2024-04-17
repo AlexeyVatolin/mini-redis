@@ -59,6 +59,8 @@ class RedisDeserializer:
             return BulkString(message[end_index + 2 : end_index + 2 + size]), end_index + 2 + size
         elif message[start_index] == "+":
             return SimpleString(message[start_index + 1 : len(message) - 2]), len(message) - 2
+        print(f"Unknown message {message}")
+        return None, None
 
     def _parse_number(self, s: str, start_index: int) -> tuple[int, int]:
         end_index = start_index

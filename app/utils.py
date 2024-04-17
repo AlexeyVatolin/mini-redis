@@ -3,5 +3,5 @@ import string
 
 
 def random_id(size: int) -> str:
-    available_values = list(string.ascii_lowercase) + list(map(str, range(0, 10)))
+    available_values = string.ascii_lowercase + string.digits
     return "".join(random.choice(available_values) for _ in range(size))
