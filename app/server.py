@@ -52,8 +52,8 @@ class RedisServer:
         await writer.drain()
         raw_response = await reader.read(CHUNK_SIZE)
         print(f"Master raw response: {raw_response}")
-        response = RedisDeserializer().deserialize(raw_response)
-        print(f"Response from master: {response}")
+        response = list(RedisDeserializer().deserialize(raw_response))
+        print(f"Responses from master: {response}")
         return response
 
     async def handle_client(
@@ -76,23 +76,22 @@ class RedisServer:
     ) -> bool:
         close_connection = True
         print("received message", message)
-        parsed_message = RedisDeserializer().deserialize(message)
+        for parsed_message in RedisDeserializer().deserialize(message):
+            if self.is_master and self._handler.need_propagation(parsed_message):
+                print("propagate", message)
+                await self.propagate(message)
 
-        if self.is_master and self._handler.need_propagation(parsed_message):
-            print("propagate", message)
-            await self.propagate(message)
+            if self.is_master and self._handler.need_store_connection(parsed_message):
+                self._slave_connections.append(writer)
+                close_connection = False
 
-        if self.is_master and self._handler.need_store_connection(parsed_message):
-            self._slave_connections.append(writer)
-            close_connection = False
-
-        raw_responces = self._handler.handle(parsed_message)
-        if send_response:
-            for raw_out_message in raw_responces:
-                out_message = RedisSerializer().serialize(raw_out_message)
-                print(out_message)
-                writer.write(out_message)
-                await writer.drain()
+            raw_responces = self._handler.handle(parsed_message)
+            if send_response:
+                for raw_out_message in raw_responces:
+                    out_message = RedisSerializer().serialize(raw_out_message)
+                    print(out_message)
+                    writer.write(out_message)
+                    await writer.drain()
         return close_connection
 
     @property
