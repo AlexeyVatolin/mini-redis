@@ -5,7 +5,7 @@ from app.command_handler import RedisCommandHandler
 from app.redis_serde import BulkString, RedisDeserializer, RedisSerializer
 from app.utils import random_id
 
-CHUNK_SIZE = 100
+CHUNK_SIZE = 500
 
 
 class RedisServer:
@@ -19,11 +19,13 @@ class RedisServer:
 
         self._slave_connections: list[asyncio.StreamWriter] = []
         self._master_connection = None
+        self.handshake_finished = False
 
     async def connect_master(self) -> None:
         if not self._master_host:
             return
         reader, writer = await asyncio.open_connection(self._master_host, self._master_port)
+
         await self._send_request(reader, writer, [BulkString("ping")])
         await self._send_request(
             reader,
@@ -40,8 +42,7 @@ class RedisServer:
             writer,
             [BulkString("PSYNC"), BulkString("?"), BulkString("-1")],
         )
-        await reader.read(CHUNK_SIZE)
-
+        self.handshake_finished = True
         self._master_connection = (reader, writer)
 
     async def _send_request(
@@ -52,9 +53,7 @@ class RedisServer:
         await writer.drain()
         raw_response = await reader.read(CHUNK_SIZE)
         print(f"Master raw response: {raw_response}")
-        response = list(RedisDeserializer().deserialize(raw_response))
-        print(f"Responses from master: {response}")
-        return response
+        await self._receive_message(writer, raw_response, from_master=False)
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -72,11 +71,12 @@ class RedisServer:
             await writer.wait_closed()
 
     async def _receive_message(
-        self, writer: asyncio.StreamWriter, message: bytes, send_response: bool = True
+        self, writer: asyncio.StreamWriter, message: bytes, from_master: bool = False
     ) -> bool:
         close_connection = True
         print("received message", message)
         for parsed_message in RedisDeserializer().deserialize(message):
+            print(f"parsed message: {parsed_message}")
             if self.is_master and self._handler.need_propagation(parsed_message):
                 print("propagate", message)
                 await self.propagate(message)
@@ -85,13 +85,13 @@ class RedisServer:
                 self._slave_connections.append(writer)
                 close_connection = False
 
-            raw_responces = self._handler.handle(parsed_message)
-            if send_response:
-                for raw_out_message in raw_responces:
-                    out_message = RedisSerializer().serialize(raw_out_message)
-                    print(out_message)
-                    writer.write(out_message)
-                    await writer.drain()
+            raw_responses = self._handler.handle(parsed_message, from_master)
+            print("send messages", raw_responses)
+            for raw_out_message in raw_responses:
+                out_message = RedisSerializer().serialize(raw_out_message)
+                print(out_message)
+                writer.write(out_message)
+                await writer.drain()
         return close_connection
 
     @property
@@ -115,7 +115,5 @@ class RedisServer:
                 message = await self._master_connection[0].read(CHUNK_SIZE)
                 if not message:
                     break
-                await self._receive_message(
-                    self._master_connection[1], message, send_response=False
-                )
+                await self._receive_message(self._master_connection[1], message, from_master=True)
             await asyncio.sleep(5)

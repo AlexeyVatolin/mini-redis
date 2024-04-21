@@ -16,9 +16,10 @@ async def main():
     if args.replicaof:
         master_host, master_port = args.replicaof
     redis_server = RedisServer(args.port, master_host, master_port)
+
     await redis_server.connect_master()
-    server = await asyncio.start_server(redis_server.handle_client, "localhost", args.port)
     asyncio.create_task(redis_server.wait_master_message())
+    server = await asyncio.start_server(redis_server.handle_client, "localhost", args.port)
     async with server:
         await server.serve_forever()
 
