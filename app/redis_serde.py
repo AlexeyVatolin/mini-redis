@@ -37,6 +37,8 @@ class RedisSerializer:
             return f"*{len(message)}\r\n".encode() + b"".join(
                 self._serialize_impl(item) for item in message
             )
+        elif isinstance(message, int):
+            return f":{message}\r\n".encode()
         else:
             raise ValueError(f"Unsupported message type {type(message)}")
 
@@ -78,5 +80,4 @@ class RedisDeserializer:
         end_index = start_index
         while ord("0") <= s[end_index] <= ord("9"):
             end_index += 1
-        return int(s[start_index:end_index]), end_index
         return int(s[start_index:end_index]), end_index

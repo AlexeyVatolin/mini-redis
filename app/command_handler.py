@@ -43,6 +43,8 @@ class RedisCommandHandler:
             ):
                 return response
             return []
+        if isinstance(message.parsed, str) and message.parsed.startswith("REDIS"):
+            self._server.handshake_finished = True
         return response
 
     def _handle_impl(self, message: Message) -> list[Any]:
@@ -103,6 +105,8 @@ class RedisCommandHandler:
                     SimpleString(f"FULLRESYNC {self.master_id} {self.offset}"),
                     RDBString(default_rdb),
                 ]
+            case "wait":
+                return [0]
             case _:
                 return [ErrorString("Unknown command")]
 
