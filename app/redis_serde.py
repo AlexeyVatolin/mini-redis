@@ -1,4 +1,6 @@
-from typing import Any
+from typing import Any, Generator
+
+from app.schemas import Message
 
 
 class SimpleString(str): ...
@@ -40,11 +42,12 @@ class RedisSerializer:
 
 
 class RedisDeserializer:
-    def deserialize(self, message: bytes) -> Any:
+    def deserialize(self, message: bytes) -> Generator[Message, None, None]:
         start_index = 0
         while True:
-            value, start_index = self._deserialize_impl(message, start_index)
-            yield value
+            value, end_index = self._deserialize_impl(message, start_index)
+            yield Message(value, end_index - start_index)
+            start_index = end_index
             if start_index >= len(message):
                 break
 
@@ -75,4 +78,5 @@ class RedisDeserializer:
         end_index = start_index
         while ord("0") <= s[end_index] <= ord("9"):
             end_index += 1
+        return int(s[start_index:end_index]), end_index
         return int(s[start_index:end_index]), end_index

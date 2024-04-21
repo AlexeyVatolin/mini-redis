@@ -14,12 +14,10 @@ class RedisServer:
         self._master_host = master_host
         self._master_port = master_port
         self._handler = RedisCommandHandler(self)
-        self.master_id = random_id(40) if self.is_master else None
-        self.offset = 0
 
         self._slave_connections: list[asyncio.StreamWriter] = []
-        self._master_connection = None
         self.handshake_finished = False
+        self._master_messages_task = None
 
     async def connect_master(self) -> None:
         if not self._master_host:
@@ -43,7 +41,7 @@ class RedisServer:
             [BulkString("PSYNC"), BulkString("?"), BulkString("-1")],
         )
         self.handshake_finished = True
-        self._master_connection = (reader, writer)
+        self._master_messages_task = asyncio.create_task(self.wait_master_message(reader, writer))
 
     async def _send_request(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, message: Any
@@ -106,14 +104,11 @@ class RedisServer:
             except ConnectionResetError:
                 self._slave_connections.remove(writer)
 
-    async def wait_master_message(self) -> None:
-        if self.is_master:
-            return
-
+    async def wait_master_message(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         while True:
-            if self._master_connection is not None:
-                message = await self._master_connection[0].read(CHUNK_SIZE)
-                if not message:
-                    break
-                await self._receive_message(self._master_connection[1], message, from_master=True)
-            await asyncio.sleep(5)
+            message = await reader.read(CHUNK_SIZE)
+            if not message:
+                break
+            await self._receive_message(writer, message, from_master=True)

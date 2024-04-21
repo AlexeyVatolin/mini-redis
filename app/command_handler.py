@@ -6,6 +6,8 @@ import datetime
 from typing import TYPE_CHECKING, Any
 
 from app.redis_serde import BulkString, ErrorString, NullString, RDBString, SimpleString
+from app.schemas import Message
+from app.utils import random_id
 
 if TYPE_CHECKING:
     from app.server import RedisServer
@@ -27,81 +29,91 @@ STORAGE: dict[str, StorageValue] = {}
 class RedisCommandHandler:
     def __init__(self, server: RedisServer) -> None:
         self._server = server
+        self.master_id = random_id(40) if self._server.is_master else None
+        self.offset = 0
 
-    def handle(self, message: Any, from_master: bool = False) -> list[Any]:
+    def handle(self, message: Message, from_master: bool = False) -> list[Any]:
         response = self._handle_impl(message)
         if not self._server.is_master and from_master and self._server.handshake_finished:
-            if isinstance(message, list) and len(message) > 0 and message[0].lower() == "replconf":
+            self.offset += message.size
+            if (
+                isinstance(message.parsed, list)
+                and len(message.parsed) > 0
+                and message.parsed[0].lower() == "replconf"
+            ):
                 return response
             return []
         return response
 
-    def _handle_impl(self, message: Any) -> list[Any]:
+    def _handle_impl(self, message: Message) -> list[Any]:
         if (
-            message == SimpleString("OK")
-            or message == SimpleString("PONG")
-            or isinstance(message, str)
-            and (message.startswith("REDIS") or message.startswith("FULLRESYNC"))
+            message.parsed == SimpleString("OK")
+            or message.parsed == SimpleString("PONG")
+            or isinstance(message.parsed, str)
+            and (message.parsed.startswith("REDIS") or message.parsed.startswith("FULLRESYNC"))
         ):
             return []
-        if not isinstance(message, list) or len(message) == 0:
+        if not isinstance(message.parsed, list) or len(message.parsed) == 0:
             return [ErrorString("Wrong message format")]
-        command = message[0].lower()
+        command = message.parsed[0].lower()
         match command:
             case "ping":
                 return [SimpleString("PONG")]
             case "echo":
-                return [BulkString(message[1])]
+                return [BulkString(message.parsed[1])]
             case "set":
-                if len(message) < 3:
+                if len(message.parsed) < 3:
                     return [ErrorString("Wrong number of arguments for 'set' command")]
                 expired_time = None
-                if len(message) == 5 and message[3].lower() == "px":
+                if len(message.parsed) == 5 and message.parsed[3].lower() == "px":
                     expired_time = datetime.datetime.now() + datetime.timedelta(
-                        milliseconds=int(message[4])
+                        milliseconds=int(message.parsed[4])
                     )
-                STORAGE[message[1]] = StorageValue(expired_time, message[2])
+                STORAGE[message.parsed[1]] = StorageValue(expired_time, message.parsed[2])
                 return [SimpleString("OK")]
             case "get":
-                if message[1] in STORAGE:
+                if message.parsed[1] in STORAGE:
                     if (
-                        STORAGE[message[1]].expired_time is None
-                        or STORAGE[message[1]].expired_time > datetime.datetime.now()
+                        STORAGE[message.parsed[1]].expired_time is None
+                        or STORAGE[message.parsed[1]].expired_time > datetime.datetime.now()
                     ):
-                        return [STORAGE[message[1]].value]
+                        return [STORAGE[message.parsed[1]].value]
                     else:
-                        del STORAGE[message[1]]
+                        del STORAGE[message.parsed[1]]
 
                 return [NullString()]
             case "info":
-                if len(message) != 2 or message[1].lower() != "replication":
+                if len(message.parsed) != 2 or message.parsed[1].lower() != "replication":
                     return [ErrorString("Wrong arguments for 'info' command")]
                 role = "master" if self._server.is_master else "slave"
                 return [
                     BulkString(
-                        f"# Replication\nrole:{role}\nmaster_replid:{self._server.master_id}\nmaster_repl_offset:{self._server.offset}"
+                        f"# Replication\nrole:{role}\nmaster_replid:{self.master_id}\nmaster_repl_offset:{self.offset}"
                     )
                 ]
             case "replconf":
-                if len(message) == 3 and message[1].lower() == "getack":
-                    return [[BulkString("REPLCONF"), BulkString("ACK"), BulkString("0")]]
+                if len(message.parsed) == 3 and message.parsed[1].lower() == "getack":
+                    return [
+                        [BulkString("REPLCONF"), BulkString("ACK"), BulkString(str(self.offset))]
+                    ]
+
                 return [SimpleString("OK")]
             case "psync":
                 return [
-                    SimpleString(f"FULLRESYNC {self._server.master_id} {self._server.offset}"),
+                    SimpleString(f"FULLRESYNC {self.master_id} {self.offset}"),
                     RDBString(default_rdb),
                 ]
             case _:
                 return [ErrorString("Unknown command")]
 
-    def need_propagation(self, message: Any) -> bool:
-        if not isinstance(message, list) or len(message) == 0:
+    def need_propagation(self, message: Message) -> bool:
+        if not isinstance(message.parsed, list) or len(message.parsed) == 0:
             return False
-        command = message[0].lower()
+        command = message.parsed[0].lower()
         return command in {"set", "del"}
 
-    def need_store_connection(self, message: Any) -> bool:
-        if not isinstance(message, list) or len(message) == 0:
+    def need_store_connection(self, message: Message) -> bool:
+        if not isinstance(message.parsed, list) or len(message.parsed) == 0:
             return False
-        command = message[0].lower()
+        command = message.parsed[0].lower()
         return command == "psync"
