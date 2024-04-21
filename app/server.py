@@ -3,7 +3,6 @@ from typing import Any
 
 from app.command_handler import RedisCommandHandler
 from app.redis_serde import BulkString, RedisDeserializer, RedisSerializer
-from app.utils import random_id
 
 CHUNK_SIZE = 500
 
