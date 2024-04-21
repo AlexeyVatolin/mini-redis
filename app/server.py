@@ -94,6 +94,10 @@ class RedisServer:
     def is_master(self) -> bool:
         return self._master_host is None
 
+    @property
+    def num_replicas(self) -> int:
+        return len(self._slave_connections)
+
     async def propagate(self, message: Any) -> None:
         for writer in self._slave_connections:
             try:
