@@ -2,17 +2,18 @@ import asyncio
 from typing import Any
 
 from app.command_handler import RedisCommandHandler
-from app.redis_serde import BulkString, Message, RedisDeserializer, RedisSerializer
+from app.redis_serde import BulkString, Message, RedisSerializer
 from app.schemas import PEERNAME, Connection, WaitTrigger
 
 CHUNK_SIZE = 500
 
 
 class RedisServer:
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, config: dict[str, str] | None = None) -> None:
         self._port = port
         self._handler = RedisCommandHandler(self)
         self._offset = 0
+        self.config = config or {}
         self.handshake_finished = False
 
     async def serve_forever(self) -> None:
@@ -40,17 +41,13 @@ class RedisServer:
     async def _post_handle_hook(self, connection: Connection, message: Message) -> None:
         return None
 
-    async def _receive_message(
-        self, connection: Connection, message: bytes, from_master: bool = False
-    ) -> None:
+    async def _receive_message(self, connection: Connection, message: bytes) -> None:
         print("received message", message)
         for parsed_message in Message.from_raw(message):
             print(f"parsed message: {parsed_message}")
             await self._pre_handle_hook(connection, parsed_message)
 
-            raw_responses = await self._handler.handle(
-                parsed_message, connection.peername, from_master
-            )
+            raw_responses = await self._handler.handle(parsed_message, connection.peername)
 
             await self._post_handle_hook(connection, parsed_message)
             print("send messages", raw_responses)
@@ -77,8 +74,8 @@ class RedisServer:
 
 
 class MasterServer(RedisServer):
-    def __init__(self, port: int) -> None:
-        super().__init__(port)
+    def __init__(self, port: int, config: dict[str, str] | None = None) -> None:
+        super().__init__(port, config)
         self._port = port
         self._handler = RedisCommandHandler(self)
         self._slave_connections: dict[PEERNAME, Connection] = {}
@@ -114,6 +111,9 @@ class MasterServer(RedisServer):
 
     def count_synced_replicas(self, offset: int) -> int:
         count = 0
+        print(
+            f"Master offset {offset}, slave offsets {[c.offset for c in self._slave_connections.values()]}"
+        )
         for connection in self._slave_connections.values():
             if connection.offset >= offset:
                 count += 1
@@ -130,8 +130,10 @@ class MasterServer(RedisServer):
 
 
 class SlaveServer(RedisServer):
-    def __init__(self, port: int, master_host: str, master_port: int) -> None:
-        super().__init__(port)
+    def __init__(
+        self, port: int, master_host: str, master_port: int, config: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(port, config)
         self._master_host = master_host
         self._master_port = master_port
 
@@ -163,7 +165,7 @@ class SlaveServer(RedisServer):
         await connection.writer.drain()
         raw_response = await connection.reader.read(CHUNK_SIZE)
         print(f"Master raw response: {raw_response}")
-        await self._receive_message(connection, raw_response, from_master=True)
+        await self._receive_message(connection, raw_response)
 
     async def _post_handle_hook(self, connection: Connection, message: Message) -> None:
         if self.handshake_finished:

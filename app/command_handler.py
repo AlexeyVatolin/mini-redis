@@ -53,15 +53,12 @@ class RedisCommandHandler:
         self._storage = Storage()
         self.master_id = random_id(40) if self._server.is_master else None
 
-    async def handle(
-        self, message: Message, peername: PEERNAME, from_master: bool = False
-    ) -> list[Any]:
+    async def handle(self, message: Message, peername: PEERNAME) -> list[Any]:
         if not isinstance(message.parsed, list):
             return []
 
         response = await self._handle_impl(message, peername)
-        print("handle response", self._server.is_master, from_master)
-        if not self._server.is_master:  # and from_master:
+        if not self._server.is_master:
             if message.parsed[0].lower() in {"replconf", "info", "get"}:
                 return response
             return []
@@ -136,9 +133,11 @@ class RedisCommandHandler:
                 trigger = WaitTrigger.create(num_replicas, master_offset)
                 self._server.register_trigger(trigger)
 
-                await self._server.propagate(
-                    Message.from_parsed(
-                        [BulkString("REPLCONF"), BulkString("GETACK"), BulkString("*")]
+                asyncio.create_task(
+                    self._server.propagate(
+                        Message.from_parsed(
+                            [BulkString("REPLCONF"), BulkString("GETACK"), BulkString("*")]
+                        )
                     )
                 )
 
@@ -146,6 +145,14 @@ class RedisCommandHandler:
                     await asyncio.wait_for(trigger.event.wait(), timeout / 1000)
 
                 return [self._server.count_synced_replicas(master_offset)]
+            case "config":
+                subcommand = message.parsed[1].lower()
+                if subcommand == "get":
+                    key = message.parsed[2].lower()
+                    if key not in {"dir", "dbfilename"}:
+                        return [ErrorString(f"Unknown config key {key}")]
+                    return [[BulkString(key), BulkString(self._server.config[key])]]
+                return [ErrorString("Unknown config subcommand {subcommand}")]
             case _:
                 return [ErrorString("Unknown command")]
 
