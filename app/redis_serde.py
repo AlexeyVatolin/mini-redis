@@ -1,6 +1,5 @@
+from dataclasses import dataclass
 from typing import Any, Generator
-
-from app.schemas import Message
 
 
 class SimpleString(str): ...
@@ -13,9 +12,6 @@ class RDBString(bytes): ...
 
 
 class ErrorString(str): ...
-
-
-class NullString: ...
 
 
 class RedisSerializer:
@@ -31,7 +27,7 @@ class RedisSerializer:
             return f"-{message}\r\n".encode()
         elif isinstance(message, RDBString):
             return f"${len(message)}\r\n".encode() + message
-        elif isinstance(message, NullString):
+        elif message is None:
             return "$-1\r\n".encode()
         elif isinstance(message, list):
             return f"*{len(message)}\r\n".encode() + b"".join(
@@ -44,16 +40,16 @@ class RedisSerializer:
 
 
 class RedisDeserializer:
-    def deserialize(self, message: bytes) -> Generator[Message, None, None]:
+    def deserialize(self, message: bytes) -> Generator["Message", None, None]:
         start_index = 0
         while True:
             value, end_index = self._deserialize_impl(message, start_index)
-            yield Message(value, end_index - start_index)
+            yield Message(value, message[start_index:end_index], end_index - start_index)
             start_index = end_index
             if start_index >= len(message):
                 break
 
-    def _deserialize_impl(self, message: str, start_index: int = 0) -> Any:
+    def _deserialize_impl(self, message: bytes, start_index: int = 0) -> Any:
         if len(message) - start_index == 0:
             return None, None
         if message[start_index] == ord("*"):
@@ -76,8 +72,24 @@ class RedisDeserializer:
         print(f"Unknown message {message}")
         return None, None
 
-    def _parse_number(self, s: str, start_index: int) -> tuple[int, int]:
+    def _parse_number(self, message: bytes, start_index: int) -> tuple[int, int]:
         end_index = start_index
-        while ord("0") <= s[end_index] <= ord("9"):
+        while ord("0") <= message[end_index] <= ord("9"):
             end_index += 1
-        return int(s[start_index:end_index]), end_index
+        return int(message[start_index:end_index]), end_index
+
+
+@dataclass
+class Message:
+    parsed: Any
+    raw: bytes
+    size: int
+
+    @staticmethod
+    def from_parsed(parsed: Any) -> "Message":
+        raw = RedisSerializer().serialize(parsed)
+        return Message(parsed, raw, len(raw))
+
+    @staticmethod
+    def from_raw(raw: bytes) -> list["Message"]:
+        return list(RedisDeserializer().deserialize(raw))

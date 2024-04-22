@@ -2,115 +2,173 @@ import asyncio
 from typing import Any
 
 from app.command_handler import RedisCommandHandler
-from app.redis_serde import BulkString, RedisDeserializer, RedisSerializer
+from app.redis_serde import BulkString, Message, RedisDeserializer, RedisSerializer
+from app.schemas import PEERNAME, Connection, WaitTrigger
 
 CHUNK_SIZE = 500
 
 
 class RedisServer:
-    def __init__(self, port: int, master_host: str | None, master_port: int | None) -> None:
+    def __init__(self, port: int) -> None:
         self._port = port
-        self._master_host = master_host
-        self._master_port = master_port
         self._handler = RedisCommandHandler(self)
-
-        self._slave_connections: list[asyncio.StreamWriter] = []
+        self._offset = 0
         self.handshake_finished = False
-        self._master_messages_task = None
 
-    async def connect_master(self) -> None:
-        if not self._master_host:
-            return
-        reader, writer = await asyncio.open_connection(self._master_host, self._master_port)
-
-        await self._send_request(reader, writer, [BulkString("ping")])
-        await self._send_request(
-            reader,
-            writer,
-            [BulkString("REPLCONF"), BulkString("listening-port"), BulkString(self._port)],
-        )
-        await self._send_request(
-            reader,
-            writer,
-            [BulkString("REPLCONF"), BulkString("capa"), BulkString("psync2")],
-        )
-        await self._send_request(
-            reader,
-            writer,
-            [BulkString("PSYNC"), BulkString("?"), BulkString("-1")],
-        )
-        self._master_messages_task = asyncio.create_task(self.wait_master_message(reader, writer))
-
-    async def _send_request(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, message: Any
-    ) -> Any:
-        out_message = RedisSerializer().serialize(message)
-        writer.write(out_message)
-        await writer.drain()
-        raw_response = await reader.read(CHUNK_SIZE)
-        print(f"Master raw response: {raw_response}")
-        await self._receive_message(writer, raw_response, from_master=True)
+    async def serve_forever(self) -> None:
+        server = await asyncio.start_server(self.handle_client, "localhost", self._port)
+        async with server:
+            await server.serve_forever()
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        addr = writer.get_extra_info("peername")
+        connection = Connection.create(reader, writer)
         while True:
             message = await reader.read(CHUNK_SIZE)
             if not message:
                 break
-            print(f"{addr}: {message!r}")
-            close_connection = await self._receive_message(writer, message)
+            print(f"{connection.peername}: {message!r}")
+            await self._receive_message(connection, message)
 
-        if close_connection:
-            writer.close()
-            await writer.wait_closed()
+        writer.close()
+        await writer.wait_closed()
+
+    async def _pre_handle_hook(self, connection: Connection, message: Message) -> None:
+        return None
+
+    async def _post_handle_hook(self, connection: Connection, message: Message) -> None:
+        return None
 
     async def _receive_message(
-        self, writer: asyncio.StreamWriter, message: bytes, from_master: bool = False
-    ) -> bool:
-        close_connection = True
+        self, connection: Connection, message: bytes, from_master: bool = False
+    ) -> None:
         print("received message", message)
-        for parsed_message in RedisDeserializer().deserialize(message):
+        for parsed_message in Message.from_raw(message):
             print(f"parsed message: {parsed_message}")
-            if self.is_master and self._handler.need_propagation(parsed_message):
-                print("propagate", message)
-                await self.propagate(message)
+            await self._pre_handle_hook(connection, parsed_message)
 
-            if self.is_master and self._handler.need_store_connection(parsed_message):
-                self._slave_connections.append(writer)
-                close_connection = False
+            raw_responses = await self._handler.handle(
+                parsed_message, connection.peername, from_master
+            )
 
-            raw_responses = self._handler.handle(parsed_message, from_master)
+            await self._post_handle_hook(connection, parsed_message)
             print("send messages", raw_responses)
             for raw_out_message in raw_responses:
                 out_message = RedisSerializer().serialize(raw_out_message)
                 print(out_message)
-                writer.write(out_message)
-                await writer.drain()
-        return close_connection
+                connection.writer.write(out_message)
+                await connection.writer.drain()
+
+    def _inc_offset(self, offset: int) -> None:
+        self._offset += offset
 
     @property
     def is_master(self) -> bool:
-        return self._master_host is None
+        return False
+
+    @property
+    def num_replicas(self) -> int:
+        return 0
+
+    @property
+    def offset(self) -> int:
+        return self._offset
+
+
+class MasterServer(RedisServer):
+    def __init__(self, port: int) -> None:
+        super().__init__(port)
+        self._port = port
+        self._handler = RedisCommandHandler(self)
+        self._slave_connections: dict[PEERNAME, Connection] = {}
+        self._wait_triggers: list[WaitTrigger] = []
+
+    async def _pre_handle_hook(self, connection, message: Message) -> None:
+        if self._handler.need_store_connection(message):
+            self._slave_connections[connection.peername] = connection
+
+    @property
+    def is_master(self) -> bool:
+        return True
 
     @property
     def num_replicas(self) -> int:
         return len(self._slave_connections)
 
-    async def propagate(self, message: Any) -> None:
-        for writer in self._slave_connections:
+    async def propagate(self, message: Message) -> None:
+        self._inc_offset(message.size)
+        for peername, connection in self._slave_connections.items():
             try:
-                writer.write(message)
-                await writer.drain()
+                connection.writer.write(message.raw)
+                await connection.writer.drain()
             except ConnectionResetError:
-                self._slave_connections.remove(writer)
+                del self._slave_connections[peername]
 
-    async def wait_master_message(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        while True:
-            message = await reader.read(CHUNK_SIZE)
-            if not message:
-                break
-            await self._receive_message(writer, message, from_master=True)
+    def store_offset(self, peername: PEERNAME, offset: int) -> None:
+        if peername not in self._slave_connections:
+            print(f"Connection {peername} not found")
+            return
+        self._slave_connections[peername].offset = offset
+        self._check_wait_triggers()
+
+    def count_synced_replicas(self, offset: int) -> int:
+        count = 0
+        for connection in self._slave_connections.values():
+            if connection.offset >= offset:
+                count += 1
+        return count
+
+    def register_trigger(self, trigger: WaitTrigger) -> None:
+        self._wait_triggers.append(trigger)
+
+    def _check_wait_triggers(self) -> None:
+        for trigger in self._wait_triggers:
+            if self.count_synced_replicas(trigger.master_offset) >= trigger.num_replicas:
+                trigger.event.set()
+                self._wait_triggers.remove(trigger)
+
+
+class SlaveServer(RedisServer):
+    def __init__(self, port: int, master_host: str, master_port: int) -> None:
+        super().__init__(port)
+        self._master_host = master_host
+        self._master_port = master_port
+
+    async def serve_forever(self) -> None:
+        await self.connect_master()
+        return await super().serve_forever()
+
+    async def connect_master(self) -> None:
+        reader, writer = await asyncio.open_connection(self._master_host, self._master_port)
+        connection = Connection.create(reader, writer)
+        await self._send_request(connection, [BulkString("ping")])
+        await self._send_request(
+            connection,
+            [BulkString("REPLCONF"), BulkString("listening-port"), BulkString(self._port)],
+        )
+        await self._send_request(
+            connection,
+            [BulkString("REPLCONF"), BulkString("capa"), BulkString("psync2")],
+        )
+        await self._send_request(
+            connection,
+            [BulkString("PSYNC"), BulkString("?"), BulkString("-1")],
+        )
+        asyncio.create_task(self.handle_client(reader, writer))
+
+    async def _send_request(self, connection: Connection, message: Any) -> Any:
+        out_message = RedisSerializer().serialize(message)
+        connection.writer.write(out_message)
+        await connection.writer.drain()
+        raw_response = await connection.reader.read(CHUNK_SIZE)
+        print(f"Master raw response: {raw_response}")
+        await self._receive_message(connection, raw_response, from_master=True)
+
+    async def _post_handle_hook(self, connection: Connection, message: Message) -> None:
+        if self.handshake_finished:
+            self._inc_offset(message.size)
+
+        # TODO: refactor this
+        if isinstance(message.parsed, str) and message.parsed.startswith("REDIS"):
+            self.handshake_finished = True

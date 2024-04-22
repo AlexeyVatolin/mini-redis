@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import dataclasses
 import datetime
 from typing import TYPE_CHECKING, Any
 
-from app.redis_serde import BulkString, ErrorString, NullString, RDBString, SimpleString
-from app.schemas import Message
+from app.redis_serde import BulkString, ErrorString, Message, RDBString, SimpleString
+from app.schemas import PEERNAME, WaitTrigger
 from app.utils import random_id
 
 if TYPE_CHECKING:
@@ -26,37 +28,49 @@ class StorageValue:
 STORAGE: dict[str, StorageValue] = {}
 
 
+class Storage:
+    def __init__(self) -> None:
+        self._storage: dict[str, StorageValue] = {}
+
+    def __setitem__(self, key: str, value: StorageValue) -> None:
+        self._storage[key] = value
+
+    def __getitem__(self, key: str) -> Any:
+        if self._storage[key]:
+            if (
+                self._storage[key].expired_time is None
+                or self._storage[key].expired_time > datetime.datetime.now()
+            ):
+                return self._storage[key].value
+            else:
+                del self._storage[key]
+        return None
+
+
 class RedisCommandHandler:
     def __init__(self, server: RedisServer) -> None:
         self._server = server
+        self._storage = Storage()
         self.master_id = random_id(40) if self._server.is_master else None
-        self.offset = 0
 
-    def handle(self, message: Message, from_master: bool = False) -> list[Any]:
-        response = self._handle_impl(message)
-        if not self._server.is_master and from_master and self._server.handshake_finished:
-            self.offset += message.size
-            if (
-                isinstance(message.parsed, list)
-                and len(message.parsed) > 0
-                and message.parsed[0].lower() == "replconf"
-            ):
+    async def handle(
+        self, message: Message, peername: PEERNAME, from_master: bool = False
+    ) -> list[Any]:
+        if not isinstance(message.parsed, list):
+            return []
+
+        response = await self._handle_impl(message, peername)
+        print("handle response", self._server.is_master, from_master)
+        if not self._server.is_master:  # and from_master:
+            if message.parsed[0].lower() in {"replconf", "info", "get"}:
                 return response
             return []
-        if isinstance(message.parsed, str) and message.parsed.startswith("REDIS"):
-            self._server.handshake_finished = True
+
         return response
 
-    def _handle_impl(self, message: Message) -> list[Any]:
-        if (
-            message.parsed == SimpleString("OK")
-            or message.parsed == SimpleString("PONG")
-            or isinstance(message.parsed, str)
-            and (message.parsed.startswith("REDIS") or message.parsed.startswith("FULLRESYNC"))
-        ):
-            return []
-        if not isinstance(message.parsed, list) or len(message.parsed) == 0:
-            return [ErrorString("Wrong message format")]
+    async def _handle_impl(self, message: Message, peername: PEERNAME) -> list[Any]:
+        from app.server import MasterServer
+
         command = message.parsed[0].lower()
         match command:
             case "ping":
@@ -66,55 +80,74 @@ class RedisCommandHandler:
             case "set":
                 if len(message.parsed) < 3:
                     return [ErrorString("Wrong number of arguments for 'set' command")]
-                expired_time = None
+                if isinstance(self._server, MasterServer):
+                    asyncio.create_task(self._server.propagate(message))
+
+                key, expired_time = message.parsed[1], None
                 if len(message.parsed) == 5 and message.parsed[3].lower() == "px":
                     expired_time = datetime.datetime.now() + datetime.timedelta(
                         milliseconds=int(message.parsed[4])
                     )
-                STORAGE[message.parsed[1]] = StorageValue(expired_time, message.parsed[2])
+                self._storage[key] = StorageValue(expired_time, message.parsed[2])
                 return [SimpleString("OK")]
             case "get":
-                if message.parsed[1] in STORAGE:
-                    if (
-                        STORAGE[message.parsed[1]].expired_time is None
-                        or STORAGE[message.parsed[1]].expired_time > datetime.datetime.now()
-                    ):
-                        return [STORAGE[message.parsed[1]].value]
-                    else:
-                        del STORAGE[message.parsed[1]]
-
-                return [NullString()]
+                return [self._storage[message.parsed[1]]]
             case "info":
                 if len(message.parsed) != 2 or message.parsed[1].lower() != "replication":
                     return [ErrorString("Wrong arguments for 'info' command")]
                 role = "master" if self._server.is_master else "slave"
                 return [
                     BulkString(
-                        f"# Replication\nrole:{role}\nmaster_replid:{self.master_id}\nmaster_repl_offset:{self.offset}"
+                        f"# Replication\nrole:{role}\nmaster_replid:{self.master_id}\nmaster_repl_offset:{self._server.offset}"
                     )
                 ]
             case "replconf":
                 if len(message.parsed) == 3 and message.parsed[1].lower() == "getack":
                     return [
-                        [BulkString("REPLCONF"), BulkString("ACK"), BulkString(str(self.offset))]
+                        [
+                            BulkString("REPLCONF"),
+                            BulkString("ACK"),
+                            BulkString(str(self._server.offset)),
+                        ]
                     ]
+                if len(message.parsed) == 3 and message.parsed[1].lower() == "ack":
+                    if isinstance(self._server, MasterServer):
+                        self._server.store_offset(peername, int(message.parsed[2]))
+                    return []
 
                 return [SimpleString("OK")]
             case "psync":
                 return [
-                    SimpleString(f"FULLRESYNC {self.master_id} {self.offset}"),
+                    SimpleString(f"FULLRESYNC {self.master_id} {self._server.offset}"),
                     RDBString(default_rdb),
                 ]
             case "wait":
-                return [self._server.num_replicas]
+                if len(message.parsed) != 3:
+                    return [ErrorString("Wrong arguments for 'wait' command")]
+                if not isinstance(self._server, MasterServer):
+                    return [ErrorString("Only available for master")]
+
+                num_replicas, timeout = map(int, message.parsed[1:])
+                master_offset = self._server.offset
+                synced_replicas = self._server.count_synced_replicas(master_offset)
+                if num_replicas <= synced_replicas:
+                    return [self._server.num_replicas]
+
+                trigger = WaitTrigger.create(num_replicas, master_offset)
+                self._server.register_trigger(trigger)
+
+                await self._server.propagate(
+                    Message.from_parsed(
+                        [BulkString("REPLCONF"), BulkString("GETACK"), BulkString("*")]
+                    )
+                )
+
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(trigger.event.wait(), timeout / 1000)
+
+                return [self._server.count_synced_replicas(master_offset)]
             case _:
                 return [ErrorString("Unknown command")]
-
-    def need_propagation(self, message: Message) -> bool:
-        if not isinstance(message.parsed, list) or len(message.parsed) == 0:
-            return False
-        command = message.parsed[0].lower()
-        return command in {"set", "del"}
 
     def need_store_connection(self, message: Message) -> bool:
         if not isinstance(message.parsed, list) or len(message.parsed) == 0:

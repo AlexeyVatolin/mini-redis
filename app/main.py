@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 
-from app.server import RedisServer
+from app.server import MasterServer, SlaveServer
 
 
 async def main():
@@ -10,17 +10,13 @@ async def main():
     parser.add_argument("--replicaof", type=str, nargs="+", default=None)
     args = parser.parse_args()
 
-    # You can use print statements as follows for debugging, they'll be visible when running tests.
-    print("Logs from your program will appear here!")
-    master_host, master_port = None, None
     if args.replicaof:
         master_host, master_port = args.replicaof
-    redis_server = RedisServer(args.port, master_host, master_port)
+        server = SlaveServer(args.port, master_host, master_port)
+    else:
+        server = MasterServer(args.port)
 
-    await redis_server.connect_master()
-    server = await asyncio.start_server(redis_server.handle_client, "localhost", args.port)
-    async with server:
-        await server.serve_forever()
+    await server.serve_forever()
 
 
 if __name__ == "__main__":
