@@ -133,11 +133,9 @@ class RedisCommandHandler:
                 trigger = WaitTrigger.create(num_replicas, master_offset)
                 self._server.register_trigger(trigger)
 
-                asyncio.create_task(
-                    self._server.propagate(
-                        Message.from_parsed(
-                            [BulkString("REPLCONF"), BulkString("GETACK"), BulkString("*")]
-                        )
+                await self._server.propagate(
+                    Message.from_parsed(
+                        [BulkString("REPLCONF"), BulkString("GETACK"), BulkString("*")]
                     )
                 )
 

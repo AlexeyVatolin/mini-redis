@@ -106,6 +106,9 @@ class MasterServer(RedisServer):
         if peername not in self._slave_connections:
             print(f"Connection {peername} not found")
             return
+        print(
+            f"Connection {peername} offset updated from {self._slave_connections[peername].offset} to {offset}"
+        )
         self._slave_connections[peername].offset = offset
         self._check_wait_triggers()
 
