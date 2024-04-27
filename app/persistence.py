@@ -20,6 +20,8 @@ class PersistantStorage:
         if not self._file.exists():
             return self._storage
         with self._file.open("rb") as f:
+            print(f"parsing file {f.read()}")
+            f.seek(0)
             self._read_magic_string(f)
             self._read_version(f)
             while True:

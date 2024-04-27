@@ -101,12 +101,15 @@ class MasterServer(RedisServer):
 
     async def propagate(self, message: Message) -> None:
         self._inc_offset(message.size)
+        to_remove = []
         for peername, connection in self._slave_connections.items():
             try:
                 connection.writer.write(message.raw)
                 await connection.writer.drain()
             except ConnectionResetError:
-                del self._slave_connections[peername]
+                to_remove.append(peername)
+        for peername in to_remove:
+            del self._slave_connections[peername]
 
     def store_offset(self, peername: PEERNAME, offset: int) -> None:
         if peername not in self._slave_connections:

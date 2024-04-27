@@ -63,7 +63,8 @@ class RedisCommandHandler:
                 self._storage[key] = StorageValue(message.parsed[2], expired_time)
                 return [SimpleString("OK")]
             case "get":
-                return [self._storage[message.parsed[1]]]
+                value = self._storage[message.parsed[1]]
+                return [BulkString(value) if value else None]
             case "info":
                 if len(message.parsed) != 2 or message.parsed[1].lower() != "replication":
                     return [ErrorString("Wrong arguments for 'info' command")]
@@ -100,6 +101,7 @@ class RedisCommandHandler:
                     return [ErrorString("Only available for master")]
 
                 num_replicas, timeout = map(int, message.parsed[1:])
+                num_replicas = min(num_replicas, self._server.num_replicas)
                 master_offset = self._server.offset
                 synced_replicas = self._server.count_synced_replicas(master_offset)
                 if num_replicas <= synced_replicas:
