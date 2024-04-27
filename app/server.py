@@ -1,7 +1,9 @@
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from app.command_handler import RedisCommandHandler
+from app.persistence import PersistantStorage
 from app.redis_serde import BulkString, Message, RedisSerializer
 from app.schemas import PEERNAME, Connection, WaitTrigger
 
@@ -11,7 +13,12 @@ CHUNK_SIZE = 500
 class RedisServer:
     def __init__(self, port: int, config: dict[str, str] | None = None) -> None:
         self._port = port
-        self._handler = RedisCommandHandler(self)
+        storage = None
+        if config and "dir" in config and "dbfilename" in config:
+            storage = PersistantStorage(
+                Path(config["dir"]) / config["dbfilename"]
+            ).create_storage()
+        self._handler = RedisCommandHandler(self, storage)
         self._offset = 0
         self.config = config or {}
         self.handshake_finished = False
@@ -77,7 +84,6 @@ class MasterServer(RedisServer):
     def __init__(self, port: int, config: dict[str, str] | None = None) -> None:
         super().__init__(port, config)
         self._port = port
-        self._handler = RedisCommandHandler(self)
         self._slave_connections: dict[PEERNAME, Connection] = {}
         self._wait_triggers: list[WaitTrigger] = []
 

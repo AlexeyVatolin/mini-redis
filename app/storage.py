@@ -5,8 +5,8 @@ from typing import Any
 
 @dataclasses.dataclass
 class StorageValue:
-    expired_time: datetime.datetime | None
     value: Any
+    expired_time: datetime.datetime | None = None
 
 
 class Storage:
@@ -26,3 +26,9 @@ class Storage:
             else:
                 del self._storage[key]
         return None
+
+    def __iter__(self) -> Any:
+        return iter(self._storage)
+
+    def __len__(self) -> int:
+        return len(self._storage)
