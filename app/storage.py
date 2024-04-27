@@ -17,7 +17,7 @@ class Storage:
         self._storage[key] = value
 
     def __getitem__(self, key: str) -> Any:
-        if self._storage[key]:
+        if key in self._storage and self._storage[key]:
             if (
                 self._storage[key].expired_time is None
                 or self._storage[key].expired_time > datetime.datetime.now()
