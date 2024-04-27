@@ -65,6 +65,11 @@ class RedisCommandHandler:
             case "get":
                 value = self._storage[message.parsed[1]]
                 return [BulkString(value) if value else None]
+            case "type":
+                value = self._storage[message.parsed[1]]
+                if isinstance(value, str):
+                    return [SimpleString("string")]
+                return [SimpleString("none")]
             case "info":
                 if len(message.parsed) != 2 or message.parsed[1].lower() != "replication":
                     return [ErrorString("Wrong arguments for 'info' command")]
