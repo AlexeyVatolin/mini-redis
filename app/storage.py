@@ -16,7 +16,7 @@ class StorageValue:
 
 @dataclass(order=True, frozen=True)
 class StreamKey:
-    timestamp: int
+    timestamp: int | float
     sequence_number: int | float
 
     def __str__(self) -> str:
@@ -68,6 +68,10 @@ class Stream:
 
     @staticmethod
     def _make_key(key: str, position: Literal["start", "end"]) -> StreamKey:
+        if key == "-":
+            return StreamKey(0, 0)
+        if key == "+":
+            return StreamKey(math.inf, math.inf)
         return (
             StreamKey(int(key), math.inf if position == "end" else 0)
             if "-" not in key
