@@ -2,6 +2,8 @@ import dataclasses
 import datetime
 from typing import Any
 
+from app.exception import StreamIdOrderError, StreamIDTooLowError
+
 
 @dataclasses.dataclass
 class StorageValue:
@@ -9,9 +11,23 @@ class StorageValue:
     expired_time: datetime.datetime | None = None
 
 
-@dataclasses.dataclass
 class Stream:
-    entries: dict = dataclasses.field(default_factory=dict)
+    def __init__(self) -> None:
+        self._entries: dict = {}
+        self._last_entry = (0, 0)
+
+    def xadd(self, id_: str) -> None:
+        timestamp, sequence_number = map(int, id_.split("-"))
+        if timestamp <= 0 and sequence_number <= 0:
+            raise StreamIDTooLowError
+
+        if (
+            timestamp < self._last_entry[0]
+            or timestamp == self._last_entry[0]
+            and sequence_number <= self._last_entry[1]
+        ):
+            raise StreamIdOrderError()
+        self._last_entry = (timestamp, sequence_number)
 
 
 class Storage:

@@ -24,7 +24,7 @@ class RedisSerializer:
         elif isinstance(message, SimpleString):
             return f"+{message}\r\n".encode()
         elif isinstance(message, ErrorString):
-            return f"-{message}\r\n".encode()
+            return f"-ERR {message}\r\n".encode()
         elif isinstance(message, RDBString):
             return f"${len(message)}\r\n".encode() + message
         elif message is None:
