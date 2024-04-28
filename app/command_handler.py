@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.redis_serde import BulkString, ErrorString, Message, RDBString, SimpleString
 from app.schemas import PEERNAME, WaitTrigger
-from app.storage import Storage, StorageValue
+from app.storage import Storage, StorageValue, Stream
 from app.utils import random_id
 
 if TYPE_CHECKING:
@@ -65,10 +65,18 @@ class RedisCommandHandler:
             case "get":
                 value = self._storage[message.parsed[1]]
                 return [BulkString(value) if value else None]
+            case "xadd":
+                stream_key, stream_id = message.parsed[1], message.parsed[2]
+                if self._storage[stream_key] is None:
+                    self._storage[stream_key] = StorageValue(Stream())
+                # stream: Stream = self._storage[stream_key]
+                return [BulkString(stream_id)]
             case "type":
                 value = self._storage[message.parsed[1]]
                 if isinstance(value, str):
                     return [SimpleString("string")]
+                elif isinstance(value, Stream):
+                    return [SimpleString("stream")]
                 return [SimpleString("none")]
             case "info":
                 if len(message.parsed) != 2 or message.parsed[1].lower() != "replication":

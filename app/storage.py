@@ -9,6 +9,11 @@ class StorageValue:
     expired_time: datetime.datetime | None = None
 
 
+@dataclasses.dataclass
+class Stream:
+    entries: dict = dataclasses.field(default_factory=dict)
+
+
 class Storage:
     def __init__(self) -> None:
         self._storage: dict[str, StorageValue] = {}
