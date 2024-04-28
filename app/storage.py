@@ -1,5 +1,6 @@
 import dataclasses
 import datetime
+import time
 from typing import Any
 
 from app.exception import StreamIdOrderError, StreamIDTooLowError
@@ -16,18 +17,29 @@ class Stream:
         self._entries: dict = {}
         self._last_entry = (0, 0)
 
-    def xadd(self, id_: str) -> None:
-        timestamp, sequence_number = map(int, id_.split("-"))
-        if timestamp <= 0 and sequence_number <= 0:
-            raise StreamIDTooLowError
+    def xadd(self, id_: str) -> str:
+        if id_ == "*-*":
+            timestamp, sequence_number = (time.time_ns() // 1_000_000, 0)
+        elif id_.endswith("*"):
+            timestamp = int(id_.split("-")[0])
+            if self._last_entry[0] == timestamp:
+                sequence_number = self._last_entry[1] + 1
+            else:
+                sequence_number = 0
+        else:
+            timestamp, sequence_number = map(int, id_.split("-"))
 
-        if (
-            timestamp < self._last_entry[0]
-            or timestamp == self._last_entry[0]
-            and sequence_number <= self._last_entry[1]
-        ):
-            raise StreamIdOrderError()
+            if timestamp <= 0 and sequence_number <= 0:
+                raise StreamIDTooLowError
+
+            if (
+                timestamp < self._last_entry[0]
+                or timestamp == self._last_entry[0]
+                and sequence_number <= self._last_entry[1]
+            ):
+                raise StreamIdOrderError()
         self._last_entry = (timestamp, sequence_number)
+        return f"{timestamp}-{sequence_number}"
 
 
 class Storage:

@@ -72,10 +72,9 @@ class RedisCommandHandler:
                     self._storage[stream_key] = StorageValue(Stream())
                 stream: Stream = self._storage[stream_key]
                 try:
-                    stream.xadd(stream_id)
+                    return [BulkString(stream.xadd(stream_id))]
                 except RedisError as e:
                     return [ErrorString(e.message)]
-                return [BulkString(stream_id)]
             case "type":
                 value = self._storage[message.parsed[1]]
                 if isinstance(value, str):
