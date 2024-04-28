@@ -66,6 +66,10 @@ class Stream:
             if start_key <= key <= end_key
         ]
 
+    def xread(self, start: str) -> list[list[str]]:
+        start_key = self._make_key(start, "start")
+        return [[BulkString(key), self._entries[key]] for key in self._entries if key > start_key]
+
     @staticmethod
     def _make_key(key: str, position: Literal["start", "end"]) -> StreamKey:
         if key == "-":
