@@ -84,11 +84,18 @@ class RedisCommandHandler:
                 stream: Stream = self._storage[stream_key]
                 return [stream.xrange(message.parsed[2], message.parsed[3])]
             case "xread":
-                if len(message.parsed) != 4:
+                if len(message.parsed) < 4 or len(message.parsed) % 2 != 0:
                     return [ErrorString("Wrong number of arguments for 'xread' command")]
-                stream_key = message.parsed[2]
-                stream: Stream = self._storage[stream_key]
-                return [[[BulkString(stream_key), stream.xread(message.parsed[3])]]]
+                args = message.parsed[2:]
+
+                return [
+                    [
+                        [BulkString(stream_key), self._storage[stream_key].xread(start)]
+                        for stream_key, start in zip(
+                            args[: len(args) // 2], args[len(args) // 2 :]
+                        )
+                    ]
+                ]
             case "type":
                 value = self._storage[message.parsed[1]]
                 if isinstance(value, str):
