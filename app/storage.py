@@ -1,29 +1,40 @@
-import dataclasses
 import datetime
+import math
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from app.exception import StreamIdOrderError, StreamIDTooLowError
+from app.redis_serde import BulkString
 
 
-@dataclasses.dataclass
+@dataclass
 class StorageValue:
     value: Any
     expired_time: datetime.datetime | None = None
 
 
+@dataclass(order=True, frozen=True)
+class StreamKey:
+    timestamp: int
+    sequence_number: int | float
+
+    def __str__(self) -> str:
+        return f"{self.timestamp}-{self.sequence_number}"
+
+
 class Stream:
     def __init__(self) -> None:
         self._entries: dict = {}
-        self._last_entry = (0, 0)
+        self._last_entry = StreamKey(0, 0)
 
-    def xadd(self, id_: str) -> str:
+    def _vaidate_id(self, id_: str) -> StreamKey:
         if id_ == "*":
             timestamp, sequence_number = (time.time_ns() // 1_000_000, 0)
         elif id_.endswith("*"):
             timestamp = int(id_.split("-")[0])
-            if self._last_entry[0] == timestamp:
-                sequence_number = self._last_entry[1] + 1
+            if self._last_entry.timestamp == timestamp:
+                sequence_number = self._last_entry.sequence_number + 1
             else:
                 sequence_number = 0
         else:
@@ -33,13 +44,35 @@ class Stream:
                 raise StreamIDTooLowError
 
             if (
-                timestamp < self._last_entry[0]
-                or timestamp == self._last_entry[0]
-                and sequence_number <= self._last_entry[1]
+                timestamp < self._last_entry.timestamp
+                or timestamp == self._last_entry.timestamp
+                and sequence_number <= self._last_entry.sequence_number
             ):
-                raise StreamIdOrderError()
-        self._last_entry = (timestamp, sequence_number)
-        return f"{timestamp}-{sequence_number}"
+                raise StreamIdOrderError
+        return StreamKey(timestamp, sequence_number)
+
+    def xadd(self, id_: str, value: list[str]) -> str:
+        key = self._vaidate_id(id_)
+        self._last_entry = key
+        self._entries[key] = [BulkString(v) for v in value]
+        return str(key)
+
+    def xrange(self, start: str, end: str) -> list[list[str]]:
+        start_key, end_key = self._make_key(start, "start"), self._make_key(end, "end")
+        # TODO: split logic and presentation
+        return [
+            [BulkString(key), self._entries[key]]
+            for key in self._entries
+            if start_key <= key <= end_key
+        ]
+
+    @staticmethod
+    def _make_key(key: str, position: Literal["start", "end"]) -> StreamKey:
+        return (
+            StreamKey(int(key), math.inf if position == "end" else 0)
+            if "-" not in key
+            else StreamKey(*map(int, key.split("-")))
+        )
 
 
 class Storage:

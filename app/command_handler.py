@@ -67,14 +67,23 @@ class RedisCommandHandler:
                 value = self._storage[message.parsed[1]]
                 return [BulkString(value) if value else None]
             case "xadd":
+                if len(message.parsed) < 5:
+                    return [ErrorString("Wrong number of arguments for 'xadd' command")]
                 stream_key, stream_id = message.parsed[1], message.parsed[2]
                 if self._storage[stream_key] is None:
                     self._storage[stream_key] = StorageValue(Stream())
                 stream: Stream = self._storage[stream_key]
                 try:
-                    return [BulkString(stream.xadd(stream_id))]
+                    return [BulkString(stream.xadd(stream_id, message.parsed[3:]))]
                 except RedisError as e:
                     return [ErrorString(e.message)]
+            case "xrange":
+                if len(message.parsed) != 4:
+                    return [ErrorString("Wrong number of arguments for 'xrange' command")]
+                stream_key = message.parsed[1]
+                stream: Stream = self._storage[stream_key]
+
+                return [stream.xrange(message.parsed[2], message.parsed[3])]
             case "type":
                 value = self._storage[message.parsed[1]]
                 if isinstance(value, str):
