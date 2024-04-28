@@ -18,7 +18,7 @@ class Stream:
         self._last_entry = (0, 0)
 
     def xadd(self, id_: str) -> str:
-        if id_ == "*-*":
+        if id_ == "*":
             timestamp, sequence_number = (time.time_ns() // 1_000_000, 0)
         elif id_.endswith("*"):
             timestamp = int(id_.split("-")[0])
