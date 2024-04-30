@@ -4,7 +4,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from app.storage import Storage, StorageValue
+from app.schemas import StorageValue
+from app.storage import Storage
 
 
 class SpecialEncoding(Enum):

@@ -4,13 +4,13 @@ import asyncio
 import base64
 import contextlib
 import datetime
-from typing import TYPE_CHECKING, Any
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from app.exception import RedisError
 from app.redis_serde import BulkString, ErrorString, Message, RDBString, SimpleString
-from app.schemas import PEERNAME, WaitTrigger
-from app.storage import Storage, StorageValue, Stream
-from app.utils import random_id
+from app.schemas import PEERNAME, EntryId, StorageValue, StreamTrigger, WaitTrigger
+from app.storage import Storage, Stream
 
 if TYPE_CHECKING:
     from app.server import RedisServer
@@ -27,126 +27,262 @@ class RedisCommandHandler:
             self._storage = Storage()
         else:
             self._storage = storage
-        self.master_id = random_id(40) if self._server.is_master else None
 
     async def handle(self, message: Message, peername: PEERNAME) -> list[Any]:
         if not isinstance(message.parsed, list):
             return []
 
-        response = await self._handle_impl(message, peername)
+        command_class: ICommand | None = {
+            "ping": PingCommand,
+            "echo": EchoCommand,
+            "set": SetCommand,
+            "get": GetCommand,
+            "xadd": XAddCommand,
+            "xrange": XRangeCommand,
+            "xread": XReadCommand,
+            "type": TypeCommand,
+            "info": InfoCommand,
+            "replconf": ReplconfCommand,
+            "psync": PsyncCommand,
+            "wait": WaitCommand,
+            "config": ConfigCommand,
+            "keys": KeysCommand,
+        }.get(message.parsed[0].lower())
+
+        if command_class is None:
+            return [ErrorString("Unknown command")]
+
+        response = [
+            item
+            async for item in command_class(self._server, self._storage, peername).execute(message)
+        ]
+
         if not self._server.is_master:
-            if message.parsed[0].lower() in {"replconf", "info", "get"}:
+            if (
+                issubclass(command_class, ReplconfCommand)
+                or issubclass(command_class, InfoCommand)
+                or issubclass(command_class, GetCommand)
+            ):
                 return response
             return []
 
         return response
 
-    async def _handle_impl(self, message: Message, peername: PEERNAME) -> list[Any]:
+    def need_store_connection(self, message: Message) -> bool:
+        if not isinstance(message.parsed, list) or len(message.parsed) == 0:
+            return False
+        command = message.parsed[0].lower()
+        return command == "psync"
+
+
+class ICommand(ABC):
+    def __init__(self, server: RedisServer, storage: Storage, peername: PEERNAME) -> None:
+        self._server = server
+        self._storage = storage
+        self._peername = peername
+
+    @abstractmethod
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        raise NotImplementedError
+
+    def _propagate(self, message: Message) -> None:
         from app.server import MasterServer
 
-        command = message.parsed[0].lower()
-        match command:
-            case "ping":
-                return [SimpleString("PONG")]
-            case "echo":
-                return [BulkString(message.parsed[1])]
-            case "set":
-                if len(message.parsed) < 3:
-                    return [ErrorString("Wrong number of arguments for 'set' command")]
-                if isinstance(self._server, MasterServer):
-                    asyncio.create_task(self._server.propagate(message))
+        if isinstance(self._server, MasterServer):
+            asyncio.create_task(self._server.propagate(message))
 
-                key, expired_time = message.parsed[1], None
-                if len(message.parsed) == 5 and message.parsed[3].lower() == "px":
-                    expired_time = datetime.datetime.now() + datetime.timedelta(
-                        milliseconds=int(message.parsed[4])
-                    )
-                self._storage[key] = StorageValue(message.parsed[2], expired_time)
-                return [SimpleString("OK")]
-            case "get":
-                value = self._storage[message.parsed[1]]
-                return [BulkString(value) if value else None]
-            case "xadd":
-                if len(message.parsed) < 5:
-                    return [ErrorString("Wrong number of arguments for 'xadd' command")]
-                stream_key, stream_id = message.parsed[1], message.parsed[2]
-                if self._storage[stream_key] is None:
-                    self._storage[stream_key] = StorageValue(Stream())
-                stream: Stream = self._storage[stream_key]
+
+def bulk_string_wrap(xrange: list | None) -> list | None:
+    if not xrange:
+        return None
+    return [
+        BulkString(v) if isinstance(v, str) or isinstance(v, EntryId) else bulk_string_wrap(v)
+        for v in xrange
+    ]
+
+
+class PingCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        yield SimpleString("PONG")
+
+
+class EchoCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        yield BulkString(message.parsed[1])
+
+
+class SetCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        match message.parsed[1:]:
+            case [key, value]:
+                await self._set_value(message, key, value)
+                yield SimpleString("OK")
+            case [key, value, "px", expired_time]:
+                await self._set_value(
+                    message,
+                    key,
+                    value,
+                    expired_time=datetime.datetime.now()
+                    + datetime.timedelta(milliseconds=int(expired_time)),
+                )
+                yield SimpleString("OK")
+            case _:
+                yield ErrorString("Wrong number of arguments for'set' command")
+
+    async def _set_value(
+        self, message: Message, key: str, value: str, expired_time: datetime.datetime | None = None
+    ) -> None:
+        self._propagate(message)
+        self._storage[key] = StorageValue(value, expired_time)
+
+
+class GetCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str | None, None]:
+        match message.parsed[1:]:
+            case [key]:
+                value = self._storage[key]
+                yield BulkString(value) if value else None
+            case _:
+                yield ErrorString("Wrong number of arguments for 'get' command")
+
+
+class XAddCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        match message.parsed[1:]:
+            case [stream_key, entry_id, *entries]:
+                self._propagate(message)
+
                 try:
-                    return [BulkString(stream.xadd(stream_id, message.parsed[3:]))]
+                    yield BulkString(self._xadd(stream_key, entry_id, entries))
                 except RedisError as e:
-                    return [ErrorString(e.message)]
-            case "xrange":
-                if len(message.parsed) != 4:
-                    return [ErrorString("Wrong number of arguments for 'xrange' command")]
-                stream_key = message.parsed[1]
+                    yield ErrorString(e.message)
+            case _:
+                yield ErrorString("Wrong number of arguments for 'xadd' command")
+
+    def _xadd(self, stream_key: str, entry_id: str, entries: list[str]) -> EntryId:
+        if self._storage[stream_key] is None:
+            self._storage[stream_key] = StorageValue(Stream())
+        stream: Stream = self._storage[stream_key]
+
+        result = stream.xadd(entry_id, entries)
+        self._server.check_stream_triggers(stream_key, result)
+        return result
+
+
+class XRangeCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        match message.parsed[1:]:
+            case [stream_key, start, end]:
                 stream: Stream = self._storage[stream_key]
-                return [stream.xrange(message.parsed[2], message.parsed[3])]
-            case "xread":
-                if len(message.parsed) < 4 or len(message.parsed) % 2 != 0:
-                    return [ErrorString("Wrong number of arguments for 'xread' command")]
-                args = message.parsed[2:]
+                yield bulk_string_wrap(stream.xrange(start, end))
+            case _:
+                yield ErrorString("Wrong number of arguments for 'xrange' command")
 
-                return [
-                    [
-                        [BulkString(stream_key), self._storage[stream_key].xread(start)]
-                        for stream_key, start in zip(
-                            args[: len(args) // 2], args[len(args) // 2 :]
-                        )
-                    ]
-                ]
-            case "type":
-                value = self._storage[message.parsed[1]]
-                if isinstance(value, str):
-                    return [SimpleString("string")]
-                elif isinstance(value, Stream):
-                    return [SimpleString("stream")]
-                return [SimpleString("none")]
-            case "info":
-                if len(message.parsed) != 2 or message.parsed[1].lower() != "replication":
-                    return [ErrorString("Wrong arguments for 'info' command")]
+
+class XReadCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        match message.parsed[1:]:
+            case ["streams", *streams]:
+                yield bulk_string_wrap(await self._xread(streams))
+            case ["block", block_time, "streams", *streams]:
+                yield bulk_string_wrap(await self._xread(streams, float(block_time) / 1000.0))
+            case _:
+                yield ErrorString("Wrong number of arguments for 'xread' command")
+
+    async def _xread(self, streams: list[str], block_time: float = 0.0) -> list:
+        if block_time > 0:
+            trigger = StreamTrigger(asyncio.Event(), streams[0], EntryId.from_string(streams[1]))
+            self._server.register_stream_trigger(trigger)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(trigger.event.wait(), timeout=block_time)
+
+        result = []
+        for stream_key, start in zip(streams[: len(streams) // 2], streams[len(streams) // 2 :]):
+            stream: Stream | None = self._storage[stream_key]
+            if stream is None:
+                continue
+            stream_items = stream.xread(start)
+            if stream_items:
+                result.append([stream_key, stream_items])
+        if not result:
+            return [None]
+        return result
+
+
+class TypeCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        value = self._storage[message.parsed[1]]
+        if isinstance(value, str):
+            yield SimpleString("string")
+        elif isinstance(value, Stream):
+            yield SimpleString("stream")
+        yield SimpleString("none")
+
+
+class InfoCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        match [m.lower() for m in message.parsed[1:]]:
+            case ["replication"]:
                 role = "master" if self._server.is_master else "slave"
-                return [
-                    BulkString(
-                        f"# Replication\nrole:{role}\nmaster_replid:{self.master_id}\nmaster_repl_offset:{self._server.offset}"
-                    )
-                ]
-            case "replconf":
-                if len(message.parsed) == 3 and message.parsed[1].lower() == "getack":
-                    return [
-                        [
-                            BulkString("REPLCONF"),
-                            BulkString("ACK"),
-                            BulkString(str(self._server.offset)),
-                        ]
-                    ]
-                if len(message.parsed) == 3 and message.parsed[1].lower() == "ack":
-                    if isinstance(self._server, MasterServer):
-                        self._server.store_offset(peername, int(message.parsed[2]))
-                    return []
+                yield BulkString(
+                    f"# Replication\nrole:{role}\nmaster_replid:{self._server.master_id}\nmaster_repl_offset:{self._server.offset}"
+                )
+            case _:
+                yield ErrorString("Wrong arguments for 'info' command")
 
-                return [SimpleString("OK")]
-            case "psync":
-                return [
-                    SimpleString(f"FULLRESYNC {self.master_id} {self._server.offset}"),
-                    RDBString(default_rdb),
-                ]
-            case "wait":
-                if len(message.parsed) != 3:
-                    return [ErrorString("Wrong arguments for 'wait' command")]
-                if not isinstance(self._server, MasterServer):
-                    return [ErrorString("Only available for master")]
 
-                num_replicas, timeout = map(int, message.parsed[1:])
+class ReplconfCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        match [m.lower() for m in message.parsed[1:]]:
+            case ["getack", "*"]:
+                yield [
+                    BulkString("REPLCONF"),
+                    BulkString("ACK"),
+                    BulkString(str(self._server.offset)),
+                ]
+            case ["ack", offset]:
+                from app.server import MasterServer
+
+                if isinstance(self._server, MasterServer):
+                    self._server.store_offset(self._peername, int(offset))
+                    # yield SimpleString("OK")
+            case ["listening-port", _]:
+                yield SimpleString("OK")
+            case ["capa", "psync2"]:
+                yield SimpleString("OK")
+            case _:
+                yield ErrorString("Wrong arguments for'replconf' command")
+
+
+class PsyncCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str | bytes, None]:
+        match message.parsed[1:]:
+            case ["?", "-1"]:
+                yield SimpleString(f"FULLRESYNC {self._server.master_id} {self._server.offset}")
+                yield RDBString(default_rdb)
+            case _:
+                yield ErrorString("Wrong arguments for 'psync' command")
+
+
+class WaitCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        from app.server import MasterServer
+
+        if not isinstance(self._server, MasterServer):
+            yield ErrorString("Only available for master")
+
+        match message.parsed[1:]:
+            case [num_replicas, timeout]:
+                num_replicas, timeout = map(int, (num_replicas, timeout))
                 num_replicas = min(num_replicas, self._server.num_replicas)
                 master_offset = self._server.offset
                 synced_replicas = self._server.count_synced_replicas(master_offset)
                 if num_replicas <= synced_replicas:
-                    return [self._server.num_replicas]
+                    yield self._server.num_replicas
+                    return
 
                 trigger = WaitTrigger.create(num_replicas, master_offset)
-                self._server.register_trigger(trigger)
+                self._server.register_stream_trigger(trigger)
 
                 await self._server.propagate(
                     Message.from_parsed(
@@ -157,25 +293,26 @@ class RedisCommandHandler:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(trigger.event.wait(), timeout / 1000)
 
-                return [self._server.count_synced_replicas(master_offset)]
-            case "config":
-                subcommand = message.parsed[1].lower()
-                if subcommand == "get":
-                    key = message.parsed[2].lower()
-                    if key not in {"dir", "dbfilename"}:
-                        return [ErrorString(f"Unknown config key {key}")]
-                    return [[BulkString(key), BulkString(self._server.config[key])]]
-                return [ErrorString("Unknown config subcommand {subcommand}")]
-            case "keys":
-                subcommand = message.parsed[1].lower()
-                if subcommand == "*":
-                    return [[BulkString(key) for key in self._storage]]
-                return [ErrorString("Unknown keys subcommand {subcommand}")]
-            case _:
-                return [ErrorString("Unknown command")]
+                yield self._server.count_synced_replicas(master_offset)
 
-    def need_store_connection(self, message: Message) -> bool:
-        if not isinstance(message.parsed, list) or len(message.parsed) == 0:
-            return False
-        command = message.parsed[0].lower()
-        return command == "psync"
+            case _:
+                yield ErrorString("Wrong arguments for 'wait' command")
+
+
+class ConfigCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        match [m.lower() for m in message.parsed[1:]]:
+            case ["get", key]:
+                if key not in {"dir", "dbfilename"}:
+                    yield ErrorString(f"Unknown config key {key}")
+                yield [BulkString(key), BulkString(self._server.config[key])]
+            case _:
+                yield ErrorString("Wrong arguments for 'config' command")
+
+
+class KeysCommand(ICommand):
+    async def execute(self, message: Message) -> AsyncGenerator[list[str] | str, None]:
+        subcommand = message.parsed[1].lower()
+        if subcommand == "*":
+            yield [BulkString(key) for key in self._storage]
+        yield ErrorString("Unknown keys subcommand {subcommand}")
