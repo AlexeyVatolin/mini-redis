@@ -189,12 +189,15 @@ class XReadCommand(ICommand):
             case _:
                 yield ErrorString("Wrong number of arguments for 'xread' command")
 
-    async def _xread(self, streams: list[str], block_time: float = 0.0) -> list:
-        if block_time > 0:
+    async def _xread(self, streams: list[str], block_time: float | None = None) -> list:
+        if block_time is not None:
             trigger = StreamTrigger(asyncio.Event(), streams[0], EntryId.from_string(streams[1]))
             self._server.register_stream_trigger(trigger)
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(trigger.event.wait(), timeout=block_time)
+            if block_time > 0:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(trigger.event.wait(), timeout=block_time)
+            else:
+                await trigger.event.wait()
 
         result = []
         for stream_key, start in zip(streams[: len(streams) // 2], streams[len(streams) // 2 :]):
