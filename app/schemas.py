@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import datetime
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.storage import Stream
 
 PEERNAME = tuple[str, int, int, int]
 
@@ -35,8 +40,14 @@ class EntryId:
     sequence_number: int | float
 
     @staticmethod
-    def from_string(s: str) -> "EntryId":
-        timestamp, sequence_number = s.split("-")
+    def from_string(start: str, stream: Stream | None) -> "EntryId":
+        if start == "$":
+            if stream is None:
+                return EntryId(-1, -1)
+            else:
+                return stream.max_key()
+
+        timestamp, sequence_number = start.split("-")
         return EntryId(int(timestamp), int(sequence_number))
 
     def __str__(self) -> str:
@@ -47,7 +58,7 @@ class EntryId:
 class StreamTrigger:
     event: asyncio.Event
     key: str
-    entry_id: EntryId
+    entry_id: EntryId | None = None
 
 
 @dataclass

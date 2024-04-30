@@ -11,6 +11,7 @@ from app.exception import RedisError
 from app.redis_serde import BulkString, ErrorString, Message, RDBString, SimpleString
 from app.schemas import PEERNAME, EntryId, StorageValue, StreamTrigger, WaitTrigger
 from app.storage import Storage, Stream
+from app.utils import to_pairs
 
 if TYPE_CHECKING:
     from app.server import RedisServer
@@ -190,8 +191,16 @@ class XReadCommand(ICommand):
                 yield ErrorString("Wrong number of arguments for 'xread' command")
 
     async def _xread(self, streams: list[str], block_time: float | None = None) -> list:
+        stream_entry_id = [
+            (stream_key, EntryId.from_string(start, self._storage[stream_key]))
+            for stream_key, start in to_pairs(streams)
+        ]
         if block_time is not None:
-            trigger = StreamTrigger(asyncio.Event(), streams[0], EntryId.from_string(streams[1]))
+            trigger = StreamTrigger(
+                asyncio.Event(),
+                stream_entry_id[0][0],
+                stream_entry_id[0][1],
+            )
             self._server.register_stream_trigger(trigger)
             if block_time > 0:
                 with contextlib.suppress(asyncio.TimeoutError):
@@ -200,11 +209,11 @@ class XReadCommand(ICommand):
                 await trigger.event.wait()
 
         result = []
-        for stream_key, start in zip(streams[: len(streams) // 2], streams[len(streams) // 2 :]):
+        for stream_key, entry_id in stream_entry_id:
             stream: Stream | None = self._storage[stream_key]
             if stream is None:
                 continue
-            stream_items = stream.xread(start)
+            stream_items = stream.xread(entry_id)
             if stream_items:
                 result.append([stream_key, stream_items])
         if not result:

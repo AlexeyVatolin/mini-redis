@@ -51,7 +51,8 @@ class RedisServer:
     def check_stream_triggers(self, key: str, entry_id: EntryId) -> None:
         for trigger in self._stream_triggers:
             if (
-                trigger.key == key
+                trigger.entry_id is None
+                or trigger.key == key
                 and entry_id.timestamp > trigger.entry_id.timestamp
                 or (
                     entry_id.timestamp == trigger.entry_id.timestamp

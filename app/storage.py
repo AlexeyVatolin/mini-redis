@@ -44,9 +44,11 @@ class Stream:
         start_key, end_key = self._make_key(start, "start"), self._make_key(end, "end")
         return [[key, self._entries[key]] for key in self._entries if start_key <= key <= end_key]
 
-    def xread(self, start: str) -> list[list[str]]:
-        start_key = self._make_key(start, "start")
-        return [[key, self._entries[key]] for key in self._entries if key > start_key]
+    def xread(self, entry_id: EntryId) -> list[list[str]]:
+        return [[key, self._entries[key]] for key in self._entries if key > entry_id]
+
+    def max_key(self) -> EntryId:
+        return max(self._entries.keys())
 
     @staticmethod
     def _make_key(key: str, position: Literal["start", "end"]) -> EntryId:
