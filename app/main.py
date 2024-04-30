@@ -13,7 +13,7 @@ async def main():
     args = parser.parse_args()
 
     config = {}
-    if args.dir:
+    if args.dir and args.dbfilename:
         config["dir"] = args.dir
     if args.dbfilename:
         config["dbfilename"] = args.dbfilename

@@ -23,8 +23,8 @@ class RedisServer:
         self._offset = 0
         self.config = config or {}
         self.handshake_finished = False
-        self.master_id = random_id(40) if self.is_master else None
         self._stream_triggers: list[StreamTrigger] = []
+        self.master_id: str | None = None
 
     async def serve_forever(self) -> None:
         server = await asyncio.start_server(self.handle_client, "localhost", self._port)
@@ -62,29 +62,19 @@ class RedisServer:
                 trigger.event.set()
                 self._stream_triggers.remove(trigger)
 
-    async def _pre_handle_hook(self, connection: Connection, message: Message) -> None:
-        return None
-
-    async def _post_handle_hook(self, connection: Connection, message: Message) -> None:
-        return None
-
     async def _receive_message(self, connection: Connection, message: bytes) -> None:
-        print("received message", message)
         for parsed_message in Message.from_raw(message):
             print(f"parsed message: {parsed_message}")
-            await self._pre_handle_hook(connection, parsed_message)
 
-            raw_responses = await self._handler.handle(parsed_message, connection.peername)
+            raw_responses = await self._handler.handle(parsed_message, connection)
 
-            await self._post_handle_hook(connection, parsed_message)
             print("send messages", raw_responses)
             for raw_out_message in raw_responses:
                 out_message = RedisSerializer().serialize(raw_out_message)
-                print(out_message)
                 connection.writer.write(out_message)
                 await connection.writer.drain()
 
-    def _inc_offset(self, offset: int) -> None:
+    def inc_offset(self, offset: int) -> None:
         self._offset += offset
 
     @property
@@ -106,10 +96,7 @@ class MasterServer(RedisServer):
         self._port = port
         self._slave_connections: dict[PEERNAME, Connection] = {}
         self._wait_triggers: list[WaitTrigger] = []
-
-    async def _pre_handle_hook(self, connection, message: Message) -> None:
-        if self._handler.need_store_connection(message):
-            self._slave_connections[connection.peername] = connection
+        self.master_id = random_id(40)
 
     @property
     def is_master(self) -> bool:
@@ -120,7 +107,7 @@ class MasterServer(RedisServer):
         return len(self._slave_connections)
 
     async def propagate(self, message: Message) -> None:
-        self._inc_offset(message.size)
+        self.inc_offset(message.size)
         to_remove = []
         for peername, connection in self._slave_connections.items():
             try:
@@ -131,14 +118,12 @@ class MasterServer(RedisServer):
         for peername in to_remove:
             del self._slave_connections[peername]
 
-    def store_offset(self, peername: PEERNAME, offset: int) -> None:
-        if peername not in self._slave_connections:
-            print(f"Connection {peername} not found")
+    def store_offset(self, connection: Connection, offset: int) -> None:
+        if connection.peername not in self._slave_connections:
+            print(f"Connection {connection.peername} not found")
             return
-        print(
-            f"Connection {peername} offset updated from {self._slave_connections[peername].offset} to {offset}"
-        )
-        self._slave_connections[peername].offset = offset
+
+        self._slave_connections[connection.peername].offset = offset
         self._check_wait_triggers()
 
     def count_synced_replicas(self, offset: int) -> int:
@@ -153,6 +138,9 @@ class MasterServer(RedisServer):
 
     def register_wait_trigger(self, trigger: WaitTrigger) -> None:
         self._wait_triggers.append(trigger)
+
+    def store_connection(self, connection: Connection) -> None:
+        self._slave_connections[connection.peername] = connection
 
     def _check_wait_triggers(self) -> None:
         for trigger in self._wait_triggers:
@@ -198,11 +186,3 @@ class SlaveServer(RedisServer):
         raw_response = await connection.reader.read(CHUNK_SIZE)
         print(f"Master raw response: {raw_response}")
         await self._receive_message(connection, raw_response)
-
-    async def _post_handle_hook(self, connection: Connection, message: Message) -> None:
-        if self.handshake_finished:
-            self._inc_offset(message.size)
-
-        # TODO: refactor this
-        if isinstance(message.parsed, str) and message.parsed.startswith("REDIS"):
-            self.handshake_finished = True

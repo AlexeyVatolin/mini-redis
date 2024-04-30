@@ -38,8 +38,6 @@ class RedisSerializer:
         else:
             raise ValueError(f"Unsupported message type {type(message)}")
 
-
-class RedisDeserializer:
     def deserialize(self, message: bytes) -> Generator["Message", None, None]:
         start_index = 0
         while True:
@@ -92,4 +90,4 @@ class Message:
 
     @staticmethod
     def from_raw(raw: bytes) -> list["Message"]:
-        return list(RedisDeserializer().deserialize(raw))
+        return list(RedisSerializer().deserialize(raw))
